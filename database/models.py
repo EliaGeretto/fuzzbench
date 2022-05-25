@@ -51,6 +51,9 @@ class Trial(Base):
     time_started = Column(DateTime(), nullable=True)
     time_ended = Column(DateTime(), nullable=True)
 
+    # Column used in local experiments.
+    cpuset = Column(String, nullable=True)
+
     # Columns used for preemptible experiments.
     preemptible = Column(Boolean, default=False, nullable=False)
     preempted = Column(Boolean, default=False, nullable=False)

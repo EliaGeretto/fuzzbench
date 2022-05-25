@@ -116,7 +116,7 @@ def delete_instances(instances, experiment_config):
                                    experiment_config['cloud_compute_zone'])
 
 
-def end_expired_trials(experiment_config: dict):
+def end_expired_trials(experiment_config: dict, cores):
     """Get all expired trials, end them and return them."""
     trials_past_expiry = get_expired_trials(experiment_config['experiment'],
                                             experiment_config['max_total_time'])
@@ -127,6 +127,8 @@ def end_expired_trials(experiment_config: dict):
             experiment_utils.get_trial_instance_name(
                 experiment_config['experiment'], trial.id))
         trial.time_ended = current_dt
+        if cores is not None and trial.cpuset.is_not(None):
+            cores.append(trial.cpuset)
 
     # Bail out here because trials_past_expiry will be truthy until evaluated.
     if not expired_instances:
@@ -520,7 +522,7 @@ def schedule(experiment_config: dict, pool, cores=None):
     logger.info('Finding trials to schedule.')
 
     # End expired trials
-    end_expired_trials(experiment_config)
+    end_expired_trials(experiment_config, cores)
 
     # Start pending trials.
     pending_trials = list(get_pending_trials(experiment_config['experiment']))
@@ -548,7 +550,7 @@ def schedule_loop(experiment_config: dict):
             runner_num_cpu_cores = experiment_config['runner_num_cpu_cores']
             processes = runners_cpus // runner_num_cpu_cores
             logger.info('Scheduling runners from core 0 to %d.' %
-                        (processes - 1))
+                        (runner_num_cpu_cores * processes - 1))
             cores = []
             for cpu in range(0, runner_num_cpu_cores * processes,
                              runner_num_cpu_cores):
@@ -592,7 +594,7 @@ def schedule_loop(experiment_config: dict):
     logger.info('Finished scheduling.')
 
 
-def update_started_trials(trial_proxies, trial_id_mapping):
+def update_started_trials(trial_proxies, trial_id_mapping, cores):
     """Update started trials in |trial_id_mapping| with results from
     |trial_proxies| and save the updated trials."""
     # Map proxies back to trials and mark trials as started when proxies were
@@ -603,6 +605,11 @@ def update_started_trials(trial_proxies, trial_id_mapping):
             continue
         trial = trial_id_mapping[proxy.id]
         trial.time_started = proxy.time_started
+        trial.cpuset = proxy.cpuset
+
+        if cores is not None:
+            cores.remove(proxy.cpuset)
+
         started_trials.append(trial)
     if started_trials:
         db_utils.add_all(started_trials)
@@ -626,15 +633,16 @@ def start_trials(trials, experiment_config: dict, pool, cores=None):
 
     start_trial_args = []
     for index, trial in enumerate(shuffled_trials):
-        start_trial_args += [
-            (TrialProxy(trial), experiment_config,
-             cores[index % len(cores)] if cores is not None else None)
-        ]
+        if cores is not None and index >= len(cores):
+            break
+
+        start_trial_args += [(TrialProxy(trial), experiment_config,
+                              cores[index] if cores is not None else None)]
 
     started_trial_proxies = pool.starmap(_start_trial, start_trial_args)
     started_trials = update_started_trials(started_trial_proxies,
-                                           trial_id_mapping)
-    logger.info('Done starting trials.')
+                                           trial_id_mapping, cores)
+    logger.info(f'Started {len(started_trials)} trials.')
     return started_trials
 
 
@@ -648,6 +656,7 @@ class TrialProxy:
         self.benchmark = trial.benchmark
         self.time_started = trial.time_started
         self.time_ended = trial.time_ended
+        self.cpuset = trial.cpuset
         self.preemptible = trial.preemptible
 
 
@@ -680,6 +689,7 @@ def _start_trial(trial: TrialProxy, experiment_config: dict, cpuset=None):
                                     cpuset)
     if started:
         trial.time_started = datetime_now()
+        trial.cpuset = cpuset
         return trial
     logger.info('Trial: %d not started.', trial.id)
     return None
